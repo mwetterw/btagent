@@ -72,7 +72,7 @@ btagt_parse_meth(const char *meth)
 }
 
 static int
-register_agent(void)
+btagt_register(void)
 {
     DBusError err;
     dbus_error_init(&err);
@@ -415,7 +415,7 @@ main(void)
     }
 
     while (!btagt.quit) {
-        if (btagt.should_register && !register_agent()) {
+        if (btagt.should_register && !btagt_register()) {
             btagt.should_register = 0;
             printf("btagent: Agent registered with bluez!\n");
         }
