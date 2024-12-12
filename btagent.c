@@ -74,16 +74,18 @@ btagt_parse_meth(const char *meth)
 static int
 btagt_register(void)
 {
+    DBusMessage *msg, *reply;
     DBusError err;
+
     dbus_error_init(&err);
 
-    DBusMessage *msg = dbus_message_new_method_call(
+    msg = dbus_message_new_method_call(
             BTAGT_BLUEZ_NAME,
             BTAGT_BLUEZ_PATH,
             BTAGT_BLUEZ_INTF_MGMT,
             "RegisterAgent");
     if (!msg) {
-        fprintf(stderr, "Couldn't create D-Bus message\n");
+        fprintf(stderr, "btagent: Couldn't create D-Bus message\n");
         return -1;
     }
     dbus_message_append_args(msg,
@@ -91,12 +93,17 @@ btagt_register(void)
             DBUS_TYPE_STRING, &btagt_type,
             DBUS_TYPE_INVALID);
 
-    dbus_connection_send_with_reply_and_block(btagt.d, msg, 1000, &err);
-    if (dbus_error_is_set(&err)) {
-        fprintf(stderr, "Couldn't send message: %s\n", err.message);
-        return -1;
+    reply = dbus_connection_send_with_reply_and_block(btagt.d, msg, 1000, &err);
+    if (!reply) {
+        if (strcmp(err.name, DBUS_ERROR_SERVICE_UNKNOWN)) {
+            fprintf(stderr, "btagent: Couldn't send message: %s\n", err.name);
+            return -1;
+        }
+        dbus_message_unref(msg);
+        return 1;
     }
     dbus_message_unref(msg);
+    dbus_message_unref(reply);
 
     msg = dbus_message_new_method_call(
             BTAGT_BLUEZ_NAME,
@@ -104,19 +111,24 @@ btagt_register(void)
             BTAGT_BLUEZ_INTF_MGMT,
             "RequestDefaultAgent");
     if (!msg) {
-        fprintf(stderr, "Couldn't create D-Bus message\n");
+        fprintf(stderr, "btagent: Couldn't create D-Bus message\n");
         return -1;
     }
     dbus_message_append_args(msg,
                              DBUS_TYPE_OBJECT_PATH, &btagt_path,
                              DBUS_TYPE_INVALID);
 
-    dbus_connection_send_with_reply_and_block(btagt.d, msg, 1000, &err);
-    if (dbus_error_is_set(&err)) {
-        fprintf(stderr, "Couldn't send message: %s\n", err.message);
-        return -1;
+    reply = dbus_connection_send_with_reply_and_block(btagt.d, msg, 1000, &err);
+    if (!reply) {
+        if (strcmp(err.name, DBUS_ERROR_SERVICE_UNKNOWN)) {
+            fprintf(stderr, "btagent: Couldn't send message: %s\n", err.name);
+            return -1;
+        }
+        dbus_message_unref(msg);
+        return 1;
     }
     dbus_message_unref(msg);
+    dbus_message_unref(reply);
 
     return 0;
 }
@@ -128,7 +140,7 @@ btagt_accept(DBusMessage *msg)
     if (!reply)
         return DBUS_HANDLER_RESULT_NEED_MEMORY;
     if (!dbus_connection_send(btagt.d, reply, NULL)) {
-        fprintf(stderr, "Error when sending reply\n");
+        fprintf(stderr, "btagent: Error when sending reply\n");
         dbus_message_unref(reply);
         return DBUS_HANDLER_RESULT_NEED_MEMORY;
     }
@@ -145,7 +157,7 @@ btagt_reject(DBusMessage *msg)
     if (!reply)
         return DBUS_HANDLER_RESULT_NEED_MEMORY;
     if (!dbus_connection_send(btagt.d, reply, NULL)) {
-        fprintf(stderr, "Error when sending reply\n");
+        fprintf(stderr, "btagent: Error when sending reply\n");
         dbus_message_unref(reply);
         return DBUS_HANDLER_RESULT_NEED_MEMORY;
     }
@@ -243,8 +255,9 @@ btagt_agent_handler(DBusConnection *d, DBusMessage *msg, void *user_data)
     case BTAGT_METH_CANCEL:
         return DBUS_HANDLER_RESULT_HANDLED;
 
-    // When bluez gracefully quits, it unregisters us
+    // When bluez unregisters us (could be because bluez quits gracefully)
     case BTAGT_METH_RELEASE:
+        printf("btagent: Bluez unregistered us. Bye!\n");
         btagt.quit = 1;
         return DBUS_HANDLER_RESULT_HANDLED;
 
@@ -295,48 +308,6 @@ btagt_filter_handler(DBusConnection *d, DBusMessage *msg, void *user_data)
     return DBUS_HANDLER_RESULT_HANDLED;
 }
 
-static int
-btagt_name_has_owner(const char *name)
-{
-    DBusError err;
-    DBusMessage *msg, *reply;
-    dbus_bool_t has_owner;
-
-    dbus_error_init(&err);
-
-    msg = dbus_message_new_method_call(
-            DBUS_SERVICE_DBUS,
-            DBUS_PATH_DBUS,
-            DBUS_INTERFACE_DBUS,
-            "NameHasOwner");
-    if (!msg) {
-        fprintf(stderr, "Couldn't create D-Bus message\n");
-        return -1;
-    }
-    dbus_message_append_args(msg, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID);
-
-    reply = dbus_connection_send_with_reply_and_block(btagt.d, msg, 1000, &err);
-    if (!reply) {
-        fprintf(stderr, "Couldn't send message: %s\n", err.message);
-        return -1;
-    }
-    dbus_message_unref(msg);
-
-    if (dbus_message_get_type(reply) != DBUS_MESSAGE_TYPE_METHOD_RETURN)
-        return -1;
-
-    if (!dbus_message_get_args(reply, &err,
-                               DBUS_TYPE_BOOLEAN, &has_owner,
-                               DBUS_TYPE_INVALID)) {
-        fprintf(stderr, "btagent: NameHasOwner reply with invalid params\n");
-        dbus_error_free(&err);
-        return -1;
-    }
-    dbus_message_unref(reply);
-
-    return has_owner ? 1 : 0;
-}
-
 static void
 btagt_sa_handler(int sig)
 {
@@ -374,7 +345,7 @@ main(void)
 
     DBusConnection *d = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
     if (!d) {
-        fprintf(stderr, "Failed to connect to D-Bus: %s\n", err.message);
+        fprintf(stderr, "btagent: Failed to connect to D-Bus: %s\n", err.name);
         dbus_error_free(&err);
         return -1;
     }
@@ -385,39 +356,37 @@ main(void)
     };
 
     if (!dbus_connection_register_object_path(btagt.d, BTAGT_PATH, &vtable, NULL)) {
-        fprintf(stderr, "Failed to register path %s\n", BTAGT_PATH);
+        fprintf(stderr, "btagent: Failed to register path %s\n", BTAGT_PATH);
         return -1;
     }
 
     if (!dbus_connection_add_filter(btagt.d, btagt_filter_handler, NULL, NULL)) {
-        fprintf(stderr, "Failed to add filter\n");
+        fprintf(stderr, "btagent: Failed to add filter\n");
         return -1;
     }
 
     dbus_bus_add_match(btagt.d, BTAGT_MATCH, &err);
     if(dbus_error_is_set(&err)) {
-        fprintf(stderr, "Failed to add match\n");
+        fprintf(stderr, "btagent: Failed to add match\n");
         return -1;
     }
 
-    int ret = btagt_name_has_owner(BTAGT_BLUEZ_NAME);
-    switch (ret) {
-    case 1:
-        btagt.should_register = 1;
-        break;
-
-    case 0:
-        printf("btagent: Waiting for bluez to appear\n");
-        break;
-
-    default:
-        return ret;
-    }
+    btagt.should_register = 1;
 
     while (!btagt.quit) {
-        if (btagt.should_register && !btagt_register()) {
+        if (btagt.should_register) {
+            int ret = btagt_register();
+            switch (ret) {
+            case 0:
+                printf("btagent: Agent registered with bluez!\n");
+                break;
+            case 1:
+                printf("btagent: Will register when bluez will appear.\n");
+                break;
+            default:
+                return ret;
+            }
             btagt.should_register = 0;
-            printf("btagent: Agent registered with bluez!\n");
         }
 
         dbus_connection_read_write_dispatch(d, 1000);
